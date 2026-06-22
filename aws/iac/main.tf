@@ -1,0 +1,150 @@
+module "vpc" {
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "6.6.1"
+
+  name = "${var.company_name}-vpc"
+  cidr = "192.168.0.0/16"
+  azs = [
+    data.aws_availability_zones.azs.names[0],
+    data.aws_availability_zones.azs.names[1]
+  ]
+  public_subnets = [
+    "192.168.1.0/24",
+    "192.168.2.0/24"
+  ]
+  private_subnets = [
+    "192.168.11.0/24",
+    "192.168.22.0/24"
+  ]
+  enable_nat_gateway = false
+  single_nat_gateway = false
+
+  # tags required for EKS discovery
+  public_subnet_tags = {
+    "kubernetes.io/role/elb" = "1"
+  }
+  private_subnet_tags = {
+    "kubernetes.io/role/internal-elb" = "1"
+  }
+  tags = {
+    "kubernetes.io/cluster/${var.company_name}-cluster" = "shared"
+  }
+}
+
+module "nat0" {
+  source = "../modules/nat"
+
+  name                        = "nat-instance-0"
+  vpc_id                      = module.vpc.vpc_id
+  public_subnet               = module.vpc.public_subnets[0]
+  private_subnets_cidr_blocks = module.vpc.private_subnets_cidr_blocks
+  private_route_table_ids     = [module.vpc.private_route_table_ids[0]]
+  use_spot_instance           = false
+  instance_types              = ["t3.micro", "t3a.micro"]
+  #  image_id                    = var.nat_image_id
+}
+
+resource "aws_eip" "nat0" {
+  network_interface = module.nat0.eni_id
+  tags = {
+    "Name" = "nat-instance-nat-instance-0"
+  }
+}
+
+module "nat1" {
+  source = "../modules/nat"
+
+  name                        = "nat-instance-1"
+  vpc_id                      = module.vpc.vpc_id
+  public_subnet               = module.vpc.public_subnets[1]
+  private_subnets_cidr_blocks = module.vpc.private_subnets_cidr_blocks
+  private_route_table_ids     = [module.vpc.private_route_table_ids[1]]
+  use_spot_instance           = false
+  instance_types              = ["t3.micro", "t3a.micro"]
+  #  image_id                    = var.nat_image_id
+}
+
+resource "aws_eip" "nat1" {
+  network_interface = module.nat1.eni_id
+  tags = {
+    "Name" = "nat-instance-nat-instance-1"
+  }
+}
+
+module "eks" {
+  source  = "terraform-aws-modules/eks/aws"
+  version = "21.20.0"
+
+  name               = "${var.company_name}-cluster"
+  kubernetes_version = "1.35"
+
+  endpoint_public_access       = var.cluster_endpoint_public_access
+  endpoint_public_access_cidrs = var.cluster_endpoint_public_access_cidrs
+  #  concat(
+  #    [for item in module.vpc.nat_public_ips: "${item}/32"], # Nat gateway's IPs need to be added to the allow list since node groups need to interact with EKS API endpoint to join the cluster
+  #    var.cluster_endpoint_public_access_allowed_from
+  #  )
+
+  addons = {
+    coredns                = {}
+    eks-pod-identity-agent = { before_compute = true }
+    kube-proxy             = {}
+    vpc-cni                = { before_compute = true }
+    # aws-ebs-csi-driver = {
+    #   pod_identity_association = [{
+    #     role_arn        = module.aws_ebs_csi_pod_identity.iam_role_arn,
+    #     service_account = "ebs-csi-controller-sa",
+    #   }]
+    # }
+    amazon-cloudwatch-observability = {
+      # configuration_values = jsonencode({}) ## skipping the default addon configuration to use the custom one
+      # resolve_conflicts    = "OVERWRITE"
+    }                        # to stream logs from node to CloudWatch and get application logs under /aws/containerinsights/payorem-cluster/application
+    snapshot-controller = {} # to avoid log message "Failed to watch *v1.VolumeSnapshotContent: failed to list *v1.VolumeSnapshotContent: the server could not find the requested resource (get volumesnapshotcontents.snapshot.storage.k8s.io"
+  }
+  vpc_id     = module.vpc.vpc_id
+  subnet_ids = module.vpc.private_subnets
+
+  # EKS Managed Node Group(s)
+  eks_managed_node_groups = {
+    worker_ng_on_demand_1 = {
+      # Starting on 1.30, AL2023 is the default AMI type for EKS managed node groups, but we use BOTTLEROCKET_x86_64 here
+      ami_type       = "BOTTLEROCKET_x86_64"
+      instance_types = ["t3.large", "t3a.large"]
+      #"Type of capacity associated with the EKS Node Group. Valid values: `ON_DEMAND`, `SPOT`"
+      capacity_type = "ON_DEMAND"
+
+      # Once provisioned it's not possible to change via TF: https://github.com/terraform-aws-modules/terraform-aws-eks/issues/2030
+      min_size     = 1
+      max_size     = 10
+      desired_size = var.worker_nodes_desired_amount
+
+      iam_role_additional_policies = {
+        AmazonEBSCSIDriverPolicy    = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy" # Needed by the aws-ebs-csi-driver
+        CloudWatchAgentServerPolicy = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+      }
+    }
+  }
+
+  # Cluster access entry
+  # To add the current caller identity as an administrator
+  enable_cluster_creator_admin_permissions = true
+
+  access_entries = {
+    # One access entry with a policy associated
+    cluster_admin = {
+      kubernetes_groups = []
+      principal_arn     = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:user/${var.aws_console_user}" ## account has to be the one used to work with the cluster
+
+      policy_associations = {
+        admin = {
+          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          access_scope = {
+            type = "cluster"
+          }
+        }
+      }
+    }
+  }
+
+}

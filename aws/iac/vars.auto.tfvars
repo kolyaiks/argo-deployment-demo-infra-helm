@@ -1,0 +1,9 @@
+region                               = "us-east-1"
+hosted_zone_name                     = "niks.cloud" //TODO: set your hosted zone
+company_name                         = "argo-deployment-demo"
+cluster_endpoint_public_access       = true
+cluster_endpoint_public_access_cidrs = ["0.0.0.0/0"] //TODO: put your CIDR here if you want to limit the scope of allowed IPs for the k8s endpoint
+domain_names                         = ["dev-app", "prod-app"]
+aws_console_user                     = "kolyaiks_iam" //TODO: set your own user
+secret_value_dev                     = "{\"environment\": \"dev\"}"
+secret_value_prod                    = "{\"environment\": \"prod\"}"
