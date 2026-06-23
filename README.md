@@ -1,4 +1,19 @@
-## Order of apply:
+## argo-deployment-demo-infra-helm
+
+This repository provisions the AWS infrastructure for a full ArgoCD-based GitOps demo. 
+Resources to be deployed include:
+
+- **VPC** (192.168.0.0/16) with public/private subnets across 2 AZs and NAT instances for outbound traffic  
+- **EKS cluster** (K8s 1.35) with managed node groups (Bottlerocket, t3.large), EKS add-ons (CoreDNS, VPC CNI, CloudWatch observability, snapshot controller, etc.), and access entries for the AWS console user  
+- **ACM certificate** for the hosted zone (with DNS validation records in Route53)  
+- **Route53 CNAME record** to point domain names to the ALB (updated post-ingress creation)  
+- **AWS Load Balancer Controller** IAM role + policy for managing ALB/NLB via Kubernetes Ingress resources  
+- **Secrets Manager** entries (`dev/env`, `prod/env`) and corresponding IAM roles with OIDC trust policies so K8s service accounts in `dev` and `prod` namespaces can read secrets  
+- **ArgoCD** itself — installed via Helm — along with a commented-out bootstrap App-of-Apps Application that syncs manifests from a [separate GitOps repo](https://github.com/kolyaiks/argo-deployment-demo-gitops)
+
+After the base infra is up, ArgoCD takes over: it deploys platform services (ALB controller) and the sample application workloads (dev/prod variants) from the GitOps repo.
+
+### Order of apply:
 
 #### 1. Setting up the base AWS infrastructure
 1. `aws/iac` folder - `terraform apply --auto-approve` to create base infrastructure
@@ -18,7 +33,7 @@
 6. `aws/iac` folder - `terraform apply --auto-approve` to deploy the ArgoCD app-of-apps that then deploys the remaining apps from `argocd-apps` folder in `main` branch here `https://github.com/kolyaiks/argo-deployment-demo-gitops/tree/main/argocd-apps`
 7. once the `external-gateway` ArgoCD app is deployed, you should see an alb deployed in AWS console, grab the DNS name for it, go to `aws/iac/r53.tf`, set the alb DNS name there, then re-deploy Terraform
 
-## Important notice about working with NAT instances
+### Important notice about working with NAT instances
 
 Once this repo is cloned from GitHub, before doing `terraform apply` make sure to check Line Separators for .sh scripts in `modules/nat` they should be using linux format equal to`LF`.
 Otherwise, you have a risk of facing weird issues when userdata script will fail and, as a result, Network Interface with EIP tied to it will not be attached to the newly created NAT instance.
